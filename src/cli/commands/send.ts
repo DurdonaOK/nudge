@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import type { Contact, Template } from "../../types.js";
+import type { Contact, MessageCategory, Template } from "../../types.js";
 import { NudgeClient } from "../../index.js";
 import { TwilioAdapter } from "../../adapters/twilio.js";
 
@@ -11,10 +11,16 @@ export function sendCommand(): Command {
     .requiredOption("--body <text>", "Message body (supports {{var}} interpolation)")
     .option("--vars <json>", "Template variables as JSON string", "{}")
     .option("--channel <channel>", "Force a specific channel (bypass routing)")
+    .option("--category <category>", "Message category: transactional|marketing|otp|alert", "transactional")
+    .option("--opted-in-categories <list>", "Comma-separated opt-in categories for test contact", "transactional,otp,alert")
     .option("--dry-run", "Simulate send without delivering", false)
     .option("--idempotency-key <key>", "Idempotency key for exactly-once delivery")
     .action(async (opts) => {
       const vars = JSON.parse(opts.vars as string) as Record<string, string>;
+      const category = (opts.category as MessageCategory) ?? "transactional";
+      const optedInCategories = (opts.optedInCategories as string)
+        .split(",")
+        .map((c) => c.trim()) as MessageCategory[];
 
       // Build a minimal contact from CLI flags
       const contact: Contact = {
@@ -31,22 +37,20 @@ export function sendCommand(): Command {
             replyRate: 0.05,
           },
         ],
-        optIns: [
-          {
-            channel: "sms",
-            category: "transactional",
-            optedIn: true,
-            updatedAt: new Date().toISOString(),
-            source: "explicit",
-          },
-        ],
+        optIns: optedInCategories.map((cat) => ({
+          channel: "sms" as const,
+          category: cat,
+          optedIn: true,
+          updatedAt: new Date().toISOString(),
+          source: "explicit" as const,
+        })),
         metadata: {},
       };
 
       const template: Template = {
         id: opts.template as string,
         body: opts.body as string,
-        category: "transactional",
+        category,
         channels: opts.channel ? ([opts.channel] as never) : undefined,
       };
 

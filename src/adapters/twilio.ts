@@ -69,9 +69,16 @@ export class TwilioAdapter implements ProviderAdapter {
 
   parseWebhook(body: unknown, _headers: Record<string, string>): WebhookEvent {
     const b = body as Record<string, string>;
+    const status = b["MessageStatus"] ?? b["SmsStatus"] ?? "";
+    const type =
+      status === "delivered" ? "delivery" :
+      status === "read"      ? "open" :
+      status === "received"  ? "reply" :
+      status === "failed" || status === "undelivered" ? "failed" :
+      "delivery";
     return {
-      type: b["MessageStatus"] === "delivered" ? "delivery" : "failed",
-      messageId: b["MessageSid"] ?? "",
+      type,
+      messageId: b["MessageSid"] ?? b["SmsSid"] ?? "",
       channel: b["From"]?.startsWith("whatsapp:") ? "whatsapp" : "sms",
       provider: this.name,
       occurredAt: new Date().toISOString(),
@@ -108,11 +115,12 @@ export class TwilioAdapter implements ProviderAdapter {
         Body: payload.body,
       };
     }
-    // RCS via Twilio (alpha)
+    // RCS via Twilio (alpha) — payload is RcsPayload here
+    const rcs = payload as { to: string; body: string };
     return {
-      To: payload.to,
+      To: rcs.to,
       From: this.#config.fromPhone,
-      Body: payload.body,
+      Body: rcs.body,
     };
   }
 }

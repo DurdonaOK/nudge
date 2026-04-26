@@ -89,10 +89,14 @@ export interface Template {
   subject?: string; // email subject
   /** Channels this template supports; undefined = all */
   channels?: Channel[];
-  /** RCS suggested replies */
+  /** RCS quick-reply chip labels (plain strings, auto-converted to reply actions) */
   suggestedReplies?: string[];
   /** Rich media URL (images, cards) */
   mediaUrl?: string;
+  /** Explicit RCS rich card config — overrides auto-extraction from markdown */
+  richCard?: Omit<RcsRichCard, "title" | "description">;
+  /** RCS carousel — when set, renders as multi-card carousel */
+  carousel?: RcsCarouselCard[];
   category: MessageCategory;
 }
 
@@ -194,16 +198,58 @@ export interface WhatsAppPayload {
   approvalStatus?: "approved" | "pending" | "rejected";
 }
 
+// ---------------------------------------------------------------------------
+// RCS rich content types
+// ---------------------------------------------------------------------------
+
+export type RcsActionType = "reply" | "open_url" | "dial" | "share_location" | "calendar";
+export type RcsMediaHeight = "SHORT" | "MEDIUM" | "TALL";
+export type RcsCardOrientation = "VERTICAL" | "HORIZONTAL";
+export type RcsCardAlignment = "LEFT" | "RIGHT";
+
+export interface RcsAction {
+  type: RcsActionType;
+  label: string;
+  /** For open_url */
+  url?: string;
+  /** For dial */
+  phone?: string;
+  /** For reply — text sent back when tapped */
+  reply?: string;
+  /** For calendar — ISO 8601 start/end */
+  calendarStart?: string;
+  calendarEnd?: string;
+  calendarTitle?: string;
+}
+
+export interface RcsRichCard {
+  title: string;
+  description: string;
+  mediaUrl?: string;
+  mediaHeight?: RcsMediaHeight;
+  /** Only for standalone card, not carousel items */
+  orientation?: RcsCardOrientation;
+  thumbnailUrl?: string;
+  actions?: RcsAction[];
+}
+
+export interface RcsCarouselCard {
+  title: string;
+  description: string;
+  mediaUrl?: string;
+  mediaHeight?: RcsMediaHeight;
+  actions?: RcsAction[];
+}
+
 export interface RcsPayload {
   channel: "rcs";
   to: string;
-  body: string;
-  suggestedReplies?: string[];
-  richCard?: {
-    title: string;
-    description: string;
-    mediaUrl?: string;
-  };
+  /** Plain-text fallback for devices that don't support RCS */
+  fallbackText: string;
+  richCard?: RcsRichCard;
+  carousel?: RcsCarouselCard[];
+  /** Quick-reply chips shown below the card */
+  suggestedReplies?: RcsAction[];
 }
 
 export interface EmailPayload {

@@ -86,9 +86,15 @@ export class VonageAdapter implements ProviderAdapter {
 
   parseWebhook(body: unknown, _headers: Record<string, string>): WebhookEvent {
     const b = body as Record<string, string>;
+    const status = b["status"] ?? "";
+    const type =
+      status === "delivered"                       ? "delivery" :
+      status === "received" || b["text"] != null   ? "reply"    :
+      status === "failed" || status === "expired"  ? "failed"   :
+      "delivery";
     return {
-      type: b["status"] === "delivered" ? "delivery" : "failed",
-      messageId: b["messageId"] ?? b["message-id"] ?? "",
+      type,
+      messageId: b["messageId"] ?? b["message-id"] ?? b["msisdn"] ?? "",
       channel: "sms",
       provider: this.name,
       occurredAt: b["timestamp"] ?? new Date().toISOString(),

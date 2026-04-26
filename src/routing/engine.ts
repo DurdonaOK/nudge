@@ -10,7 +10,6 @@ import type {
 } from "../types.js";
 import { AdapterRegistry } from "../adapters/registry.js";
 import { CompositeScorer, rankChannels } from "./scorer.js";
-import { isOptedIn } from "../contacts/store.js";
 
 export interface RoutingEngineOptions {
   registry: AdapterRegistry;
@@ -38,19 +37,13 @@ export class RoutingEngine {
     const category = template.category;
 
     if (override) {
-      return this.#buildDecision(contact, override.channel, override.provider, category, []);
+      return this.#buildDecision(contact, override.channel, override.provider ?? "unknown", category, []);
     }
 
-    // Restrict to channels the template supports
+    // Restrict to channels the template supports and that the contact can receive on.
+    // Opt-in enforcement is handled by compliance in the sender, not here.
     const eligibleChannels = (template.channels ?? this.#allAvailableChannels(contact)).filter(
-      (ch) => {
-        const adapters = this.#registry.forChannel(ch);
-        return (
-          adapters.length > 0 &&
-          isOptedIn(contact, ch, category) &&
-          contact.channels.some((c) => c.channel === ch && c.available)
-        );
-      }
+      (ch) => contact.channels.some((c) => c.channel === ch && c.available)
     );
 
     if (eligibleChannels.length === 0) {

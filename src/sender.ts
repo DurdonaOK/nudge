@@ -1,12 +1,13 @@
 import type {
   Contact,
-  DeliveryStatus,
   SendOptions,
   SendResult,
   Template,
   TemplateVars,
 } from "./types.js";
 import type { ContactStore } from "./contacts/store.js";
+import type { IdempotencyStore } from "./idempotency/store.js";
+import { MemoryIdempotencyStore } from "./idempotency/store.js";
 import { AdapterRegistry } from "./adapters/registry.js";
 import { RoutingEngine } from "./routing/engine.js";
 import { render, canDegradeTo } from "./templates/engine.js";
@@ -14,16 +15,18 @@ import { checkCompliance } from "./compliance/index.js";
 import { globalBus } from "./events/bus.js";
 import { ConversationManager } from "./conversation/manager.js";
 import { startSendSpan, recordSuccess, recordError } from "./telemetry/otel.js";
-
-// In-memory idempotency store (replace with Redis/DB in production)
-const idempotencyCache = new Map<string, SendResult>();
+import { globalMetrics } from "./metrics/index.js";
+import { globalAbTracker } from "./ab/index.js";
 
 export interface SenderDeps {
   registry: AdapterRegistry;
   contacts: ContactStore;
   router: RoutingEngine;
   conversations?: ConversationManager;
+  idempotency?: IdempotencyStore;
 }
+
+const defaultIdempotency = new MemoryIdempotencyStore();
 
 export async function send(
   contact: Contact,
@@ -33,9 +36,11 @@ export async function send(
   deps: SenderDeps
 ): Promise<SendResult> {
   const idempotencyKey = opts.idempotencyKey ?? crypto.randomUUID();
+  const store = deps.idempotency ?? defaultIdempotency;
+  const startMs = Date.now();
 
   // Exactly-once: return cached result for duplicate keys
-  const cached = idempotencyCache.get(idempotencyKey);
+  const cached = await store.get(idempotencyKey);
   if (cached) return cached;
 
   const span = startSendSpan({
@@ -43,6 +48,7 @@ export async function send(
     "nudge.template_id": template.id,
     "nudge.idempotency_key": idempotencyKey,
     "nudge.dry_run": String(opts.dryRun ?? false),
+    ...(opts.abVariant ? { "nudge.ab_variant": opts.abVariant } : {}),
   });
 
   try {
@@ -68,14 +74,14 @@ export async function send(
           retryable: !!compliance.retryAfter,
         },
       };
-      idempotencyCache.set(idempotencyKey, result);
+      await store.set(idempotencyKey, result);
       return result;
     }
 
     // Render
     let rendered = await render(template, vars, routing.channel, contact);
 
-    // Graceful degradation: try fallbacks if template can't degrade
+    // Graceful degradation: try fallbacks if template can't degrade to chosen channel
     if (!canDegradeTo(template, routing.channel)) {
       for (const fallback of routing.fallbacks) {
         if (canDegradeTo(template, fallback.channel)) {
@@ -87,7 +93,7 @@ export async function send(
       }
     }
 
-    // Dry run
+    // Dry run — return before hitting any provider
     if (opts.dryRun) {
       const result: SendResult = {
         messageId: crypto.randomUUID(),
@@ -105,11 +111,12 @@ export async function send(
       return result;
     }
 
-    // Send
+    // Send via provider
     const adapter = deps.registry.get(routing.provider);
     if (!adapter) throw new Error(`No adapter for provider: ${routing.provider}`);
 
     const providerResult = await adapter.send(rendered);
+    const latencyMs = Date.now() - startMs;
 
     const result: SendResult = {
       messageId: providerResult.providerMessageId,
@@ -124,12 +131,11 @@ export async function send(
       sentAt: new Date().toISOString(),
     };
 
-    idempotencyCache.set(idempotencyKey, result);
+    await store.set(idempotencyKey, result);
 
-    // Update contact last-contacted
+    // Side effects — all best-effort after the send succeeds
     await deps.contacts.updateLastContacted(contact.id);
 
-    // Track outbound in conversation thread
     if (deps.conversations) {
       await deps.conversations.addOutbound(
         contact.id,
@@ -139,7 +145,6 @@ export async function send(
       );
     }
 
-    // Emit lifecycle event
     await globalBus.emit({
       type: "delivery",
       messageId: result.messageId,
@@ -150,11 +155,34 @@ export async function send(
       payload: providerResult.rawResponse,
     });
 
+    globalMetrics.record({
+      messageId: result.messageId,
+      channel: routing.channel,
+      provider: routing.provider,
+      category: template.category,
+      status: result.status,
+      costUsd: result.costUsd,
+      latencyMs,
+      timestamp: result.sentAt!,
+      abVariant: opts.abVariant,
+    });
+
+    if (opts.abVariant) {
+      globalAbTracker.record({
+        experimentId: template.id,
+        variantName: opts.abVariant,
+        contactId: contact.id,
+        messageId: result.messageId,
+        sentAt: result.sentAt!,
+      });
+    }
+
     recordSuccess(span, {
       "nudge.message_id": result.messageId,
       "nudge.channel": result.channel,
       "nudge.provider": result.provider,
       "nudge.cost_usd": result.costUsd,
+      "nudge.latency_ms": latencyMs,
     });
 
     return result;
@@ -182,7 +210,7 @@ export async function send(
       dryRun: false,
       error: { code: "SEND_ERROR", message: error.message, retryable: false },
     };
-    idempotencyCache.set(idempotencyKey, failResult);
+    await store.set(idempotencyKey, failResult);
     return failResult;
   }
 }

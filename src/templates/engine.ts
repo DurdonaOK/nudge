@@ -59,24 +59,127 @@ function renderWhatsApp(
   };
 }
 
+// ---------------------------------------------------------------------------
+// RCS markdown extraction helpers
+// ---------------------------------------------------------------------------
+
+interface ParsedMarkdown {
+  title: string;
+  description: string;
+  actions: import("../types.js").RcsAction[];
+  plainText: string;
+}
+
+function parseMarkdownForRcs(body: string): ParsedMarkdown {
+  const lines = body.split("\n");
+  let title = "";
+  const descLines: string[] = [];
+  const actions: import("../types.js").RcsAction[] = [];
+
+  for (const line of lines) {
+    // # Heading → card title (first one wins)
+    const headingMatch = /^#{1,3}\s+(.+)/.exec(line);
+    if (headingMatch && !title) {
+      title = headingMatch[1]!.trim();
+      continue;
+    }
+
+    // [Label](tel:+1...) → dial action
+    const telMatch = /\[([^\]]+)\]\(tel:([^)]+)\)/.exec(line);
+    if (telMatch) {
+      actions.push({ type: "dial", label: telMatch[1]!, phone: telMatch[2]! });
+      descLines.push(line.replace(telMatch[0], telMatch[1]!));
+      continue;
+    }
+
+    // [Label](https://...) → open_url action
+    const urlMatch = /\[([^\]]+)\]\((https?:\/\/[^)]+)\)/.exec(line);
+    if (urlMatch) {
+      actions.push({ type: "open_url", label: urlMatch[1]!, url: urlMatch[2]! });
+      descLines.push(line.replace(urlMatch[0], urlMatch[1]!));
+      continue;
+    }
+
+    descLines.push(line);
+  }
+
+  // Strip remaining markdown from description
+  const rawDesc = descLines.join("\n");
+  const description = rawDesc
+    .replace(/\*\*(.+?)\*\*/g, "$1")
+    .replace(/\*(.+?)\*/g, "$1")
+    .replace(/`(.+?)`/g, "$1")
+    .replace(/^[-*]\s+/gm, "• ")
+    .trim();
+
+  const plainText = body
+    .replace(/#{1,3}\s+/g, "")
+    .replace(/\*\*(.+?)\*\*/g, "$1")
+    .replace(/\*(.+?)\*/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .trim();
+
+  return { title: title || description.split("\n")[0] || "", description, actions, plainText };
+}
+
+function buildSuggestedReplies(
+  labels?: string[]
+): import("../types.js").RcsAction[] | undefined {
+  if (!labels || labels.length === 0) return undefined;
+  return labels.map((label) => ({ type: "reply" as const, label, reply: label }));
+}
+
 function renderRcs(template: Template, body: string, contact: Contact): RcsPayload {
+  const parsed = parseMarkdownForRcs(body);
+  const suggestedReplies = buildSuggestedReplies(template.suggestedReplies);
+
+  // Carousel mode — template explicitly defines multiple cards
+  if (template.carousel && template.carousel.length > 0) {
+    return {
+      channel: "rcs",
+      to: contact.phone!,
+      fallbackText: parsed.plainText,
+      carousel: template.carousel,
+      suggestedReplies,
+    };
+  }
+
+  // Rich card mode — has media or explicit richCard config
+  const hasMedia = !!(template.mediaUrl ?? template.richCard?.mediaUrl);
+  if (hasMedia || parsed.actions.length > 0 || template.richCard) {
+    const card: import("../types.js").RcsRichCard = {
+      title: parsed.title,
+      description: parsed.description,
+      mediaUrl: template.richCard?.mediaUrl ?? template.mediaUrl,
+      mediaHeight: template.richCard?.mediaHeight ?? "MEDIUM",
+      orientation: template.richCard?.orientation ?? "VERTICAL",
+      thumbnailUrl: template.richCard?.thumbnailUrl,
+      actions: [
+        ...(template.richCard?.actions ?? []),
+        ...parsed.actions,
+      ],
+    };
+    return {
+      channel: "rcs",
+      to: contact.phone!,
+      fallbackText: parsed.plainText,
+      richCard: card,
+      suggestedReplies,
+    };
+  }
+
+  // Text-only fallback — no card
   return {
     channel: "rcs",
     to: contact.phone!,
-    body,
-    suggestedReplies: template.suggestedReplies,
-    richCard: template.mediaUrl
-      ? {
-          title: template.subject ?? "",
-          description: body.split("\n")[0] ?? body,
-          mediaUrl: template.mediaUrl,
-        }
-      : undefined,
+    fallbackText: parsed.plainText,
+    suggestedReplies,
   };
 }
 
 async function renderEmail(
   template: Template,
+  vars: TemplateVars,
   body: string,
   contact: Contact
 ): Promise<EmailPayload> {
@@ -94,28 +197,28 @@ async function renderEmail(
   return {
     channel: "email",
     to: contact.email!,
-    subject: interpolate(template.subject ?? "(no subject)", {}),
+    subject: interpolate(template.subject ?? "(no subject)", vars),
     html,
     text: plain,
   };
 }
 
-function renderPushFcm(template: Template, body: string, contact: Contact): PushPayload {
+function renderPushFcm(template: Template, vars: TemplateVars, body: string, contact: Contact): PushPayload {
   const firstLine = body.split("\n")[0] ?? body;
   return {
     channel: "push_fcm",
     token: contact.fcmToken!,
-    title: interpolate(template.subject ?? firstLine, {}),
+    title: interpolate(template.subject ?? firstLine, vars),
     body: firstLine,
   };
 }
 
-function renderPushApns(template: Template, body: string, contact: Contact): PushPayload {
+function renderPushApns(template: Template, vars: TemplateVars, body: string, contact: Contact): PushPayload {
   const firstLine = body.split("\n")[0] ?? body;
   return {
     channel: "push_apns",
     token: contact.apnsToken!,
-    title: interpolate(template.subject ?? firstLine, {}),
+    title: interpolate(template.subject ?? firstLine, vars),
     body: firstLine,
   };
 }
@@ -129,12 +232,12 @@ function renderIMessage(body: string, contact: Contact): IMessagePayload {
   };
 }
 
-function renderInApp(template: Template, body: string, contact: Contact): InAppPayload {
+function renderInApp(template: Template, vars: TemplateVars, body: string, contact: Contact): InAppPayload {
   const firstLine = body.split("\n")[0] ?? body;
   return {
     channel: "in_app",
     userId: contact.inAppUserId!,
-    title: interpolate(template.subject ?? firstLine, {}),
+    title: interpolate(template.subject ?? firstLine, vars),
     body,
     imageUrl: template.mediaUrl,
   };
@@ -160,23 +263,24 @@ export async function render(
     case "rcs":
       return renderRcs(template, body, contact);
     case "email":
-      return renderEmail(template, body, contact);
+      return renderEmail(template, vars, body, contact);
     case "push_fcm":
-      return renderPushFcm(template, body, contact);
+      return renderPushFcm(template, vars, body, contact);
     case "push_apns":
-      return renderPushApns(template, body, contact);
+      return renderPushApns(template, vars, body, contact);
     case "imessage_business":
       return renderIMessage(body, contact);
     case "in_app":
-      return renderInApp(template, body, contact);
+      return renderInApp(template, vars, body, contact);
   }
 }
 
 /** Returns whether a template can gracefully degrade to a given channel */
 export function canDegradeTo(template: Template, channel: Channel): boolean {
-  // Templates that use RCS-only features can't degrade to plain channels
-  if (template.suggestedReplies && template.suggestedReplies.length > 0) {
-    if (channel === "sms" || channel === "email") return false;
-  }
+  const hasRcsOnlyFeatures =
+    (template.suggestedReplies && template.suggestedReplies.length > 0) ||
+    !!template.carousel ||
+    !!template.richCard;
+  if (hasRcsOnlyFeatures && (channel === "sms" || channel === "email")) return false;
   return true;
 }
